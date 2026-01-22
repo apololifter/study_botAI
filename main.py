@@ -1,6 +1,5 @@
 import os
 import asyncio
-import random
 import time
 import sys
 import re
@@ -19,92 +18,7 @@ from src.utils import logger, validate_quiz_structure
 # Load env if running locally
 load_dotenv()
 
-async def main():
-    logger.info("--- Starting StudyBot Routine ---")
-    
-    # 1. Initialize Components
-    state_manager = StateManager()
-    try:
-        notion = NotionAdapter()
-        ai = QuestionGenerator()
-        evaluator = AnswerEvaluator()
-        telegram = TelegramSender()
-        receiver = TelegramReceiver()
-        web_search = WebSearch()
-        coach = CoachLogic(state_manager)
-    except Exception as e:
-        logger.error(f"Initialization Failed: {e}")
-        sys.exit(1)  # Salir con código de error para que GitHub Actions lo detecte
-
-    # 1.5 Process pending session (respuestas parciales con timeout de 1 hora)
-    pending = state_manager.get_pending_quiz()
-    if pending:
-        logger.info("Sesión pendiente encontrada. Procesando respuestas...")
-        
-        # Verificar si la sesión expiró (1 hora)
-        if state_manager.is_session_expired(pending):
-            logger.info("Sesión expirada (más de 1 hora). Cerrando y guardando respuestas parciales...")
-            await _process_expired_session(state_manager, pending, evaluator)
-            state_manager.clear_pending_quiz()
-        else:
-            # Sesión aún activa, procesar nuevas respuestas
-            try:
-                last_update_id = state_manager.get_last_update_id()
-                new_msgs = receiver.get_new_messages(last_update_id, allowed_chat_id=os.getenv("TELEGRAM_CHAT_ID"))
-
-                if new_msgs:
-                    max_update = max(m["update_id"] for m in new_msgs)
-                    state_manager.set_last_update_id(max_update)
-
-                # Procesar mensajes que llegaron después del quiz
-                sent_at = pending.get("sent_at") or 0
-                processed_answers = False
-                
-                for msg in new_msgs:
-                    if not msg.get("text") or not msg.get("date"):
-                        continue
-                    
-                    msg_timestamp = float(msg.get("date", 0))
-                    if msg_timestamp < sent_at:
-                        continue
-                    
-                    # Intentar parsear respuesta (formato: "N) respuesta" o "N. respuesta")
-                    text = msg["text"].strip()
-                    match = re.match(r'^(\d+)[).]\s*(.+)$', text, re.DOTALL)
-                    
-                    if match:
-                        question_num = int(match.group(1))
-                        answer_text = match.group(2).strip()
-                        
-                        # Validar que el número de pregunta sea válido (1-9)
-                        if 1 <= question_num <= 9:
-                            state_manager.add_answer_to_session(question_num, answer_text, msg_timestamp)
-                            logger.info(f"Respuesta registrada para pregunta {question_num}")
-                            processed_answers = True
-                
-                # Si hay respuestas nuevas, verificar si se completó o si expiró
-                if processed_answers:
-                    answers = state_manager.get_session_answers()
-                    total_questions = 6
-                    answered_count = len(answers)
-                    
-                    logger.info(f"Progreso: {answered_count}/{total_questions} preguntas respondidas")
-                    
-                    # Si se respondieron todas o expiró, procesar
-                    if answered_count >= total_questions or state_manager.is_session_expired(pending):
-                        await _process_completed_session(state_manager, pending, evaluator, answers)
-                        state_manager.clear_pending_quiz()
-                    else:
-                        # Aún hay tiempo y faltan respuestas
-                        time_remaining = pending.get("expires_at", 0) - time.time()
-                        minutes_left = int(time_remaining / 60)
-                        if minutes_left > 0:
-                            logger.info(f"Sesión activa. Faltan {total_questions - answered_count} respuestas. Tiempo restante: {minutes_left} minutos")
-                
-            except Exception as e:
-                logger.error(f"Error procesando sesión pendiente: {e}")
-                # Continuar con el flujo normal aunque falle el procesamiento
-
+# --- Helper Functions (Moved outside main) ---
 
 async def _process_expired_session(state_manager, pending, evaluator):
     """Procesa una sesión expirada guardando respuestas parciales."""
@@ -119,7 +33,7 @@ async def _process_expired_session(state_manager, pending, evaluator):
 
 async def _process_completed_session(state_manager, pending, evaluator, answers):
     """Procesa una sesión completada (todas las respuestas o expirada)."""
-    is_partial = len(answers) < 9
+    is_partial = len(answers) < 6
     logger.info(f"Procesando sesión {'parcial' if is_partial else 'completa'} con {len(answers)} respuestas...")
     await _evaluate_and_save_answers(state_manager, pending, evaluator, answers, partial=is_partial)
 
@@ -192,7 +106,113 @@ async def _evaluate_and_save_answers(state_manager, pending, evaluator, answers,
     except Exception as e:
         logger.error(f"Error evaluando respuestas: {e}")
 
+# --- Main Routine ---
+
+async def main():
+    print("DEBUG: Entered main()")
+    logger.info("--- Starting StudyBot Routine ---")
+    
+    # 1. Initialize Components
+    state_manager = StateManager()
+    try:
+        print("DEBUG: Initializing components...", flush=True)
+        print("DEBUG: - Notion...", flush=True)
+        notion = NotionAdapter()
+        print("DEBUG: - AI Generator...", flush=True)
+        ai = QuestionGenerator()
+        print("DEBUG: - Evaluator...", flush=True)
+        evaluator = AnswerEvaluator()
+        print("DEBUG: - TelegramSender...", flush=True)
+        telegram = TelegramSender()
+        print("DEBUG: - TelegramReceiver...", flush=True)
+        receiver = TelegramReceiver()
+        print("DEBUG: - WebSearch...", flush=True)
+        web_search = WebSearch()
+        print("DEBUG: - CoachLogic...", flush=True)
+        coach = CoachLogic(state_manager)
+        print("DEBUG: Initialization complete.", flush=True)
+    except Exception as e:
+        print(f"DEBUG: Error happened: {e}")
+        logger.error(f"Initialization Failed: {e}")
+        sys.exit(1)
+
+    # 1.5 Process pending session
+    print("DEBUG: Checking pending session...")
+    pending = state_manager.get_pending_quiz()
+    print(f"DEBUG: Pending session status: {bool(pending)}")
+    
+    if pending:
+        logger.info("Sesión pendiente encontrada. Procesando respuestas...")
+        
+        # Verificar si la sesión expiró (1 hora)
+        if state_manager.is_session_expired(pending):
+            logger.info("Sesión expirada (más de 1 hora). Cerrando y guardando respuestas parciales...")
+            await _process_expired_session(state_manager, pending, evaluator)
+            state_manager.clear_pending_quiz()
+        else:
+            # Sesión aún activa, procesar nuevas respuestas
+            try:
+                last_update_id = state_manager.get_last_update_id()
+                new_msgs = receiver.get_new_messages(last_update_id, allowed_chat_id=os.getenv("TELEGRAM_CHAT_ID"))
+
+                if new_msgs:
+                    max_update = max(m["update_id"] for m in new_msgs)
+                    state_manager.set_last_update_id(max_update)
+                    
+                # Procesar mensajes que llegaron después del quiz
+                sent_at = pending.get("sent_at") or 0
+                processed_answers = False
+                
+                for msg in new_msgs:
+                    if not msg.get("text") or not msg.get("date"):
+                        continue
+                    
+                    msg_timestamp = float(msg.get("date", 0))
+                    if msg_timestamp < sent_at:
+                        continue
+                    
+                    # Intentar parsear respuesta (formato: "N) respuesta" o "N. respuesta")
+                    text = msg["text"].strip()
+                    match = re.match(r'^(\d+)[).]\s*(.+)$', text, re.DOTALL)
+                    
+                    if match:
+                        question_num = int(match.group(1))
+                        answer_text = match.group(2).strip()
+                        
+                        # Validar que el número de pregunta sea válido (1-9)
+                        if 1 <= question_num <= 9:
+                            state_manager.add_answer_to_session(question_num, answer_text, msg_timestamp)
+                            logger.info(f"Respuesta registrada para pregunta {question_num}")
+                            processed_answers = True
+                
+                # Si hay respuestas nuevas, verificar si se completó o si expiró
+                if processed_answers:
+                    answers = state_manager.get_session_answers()
+                    total_questions = 6
+                    answered_count = len(answers)
+                    
+                    logger.info(f"Progreso: {answered_count}/{total_questions} preguntas respondidas")
+                    
+                    # Si se respondieron todas o expiró, procesar
+                    if answered_count >= total_questions or state_manager.is_session_expired(pending):
+                        await _process_completed_session(state_manager, pending, evaluator, answers)
+                        state_manager.clear_pending_quiz()
+                    else:
+                        # Aún hay tiempo y faltan respuestas
+                        time_remaining = pending.get("expires_at", 0) - time.time()
+                        minutes_left = int(time_remaining / 60)
+                        if minutes_left > 0:
+                            logger.info(f"Sesión activa. Faltan {total_questions - answered_count} respuestas. Tiempo restante: {minutes_left} minutos")
+                else:
+                    logger.info("No new answers found for pending session.")
+                
+            except Exception as e:
+                logger.error(f"Error procesando sesión pendiente: {e}")
+                # Continuar con el flujo normal aunque falle el procesamiento
+
+
     # 2. Fetch Candidates
+    print("DEBUG: Entering Step 2 (Fetch Pages)")
     logger.info("Fetching pages from Notion...")
     try:
         pages = notion.fetch_all_pages()
@@ -221,7 +241,7 @@ async def _evaluate_and_save_answers(state_manager, pending, evaluator, answers,
 
     # 4. Get Content
     try:
-        content = notion.get_page_content(chosen_page_id)
+        content = notion.get_page_content(chosen_page_id, max_depth=5)
     except Exception as e:
         logger.error(f"Error obteniendo contenido de página: {e}")
         return

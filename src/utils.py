@@ -53,7 +53,7 @@ def retry_on_failure(max_attempts: int = 3, delay: float = 1.0, backoff: float =
 
 def validate_quiz_structure(quiz: dict) -> Tuple[bool, Optional[str]]:
     """
-    Valida que el quiz tenga la estructura correcta con 9 preguntas (3+3+3).
+    Valida que el quiz tenga la estructura correcta con 6 preguntas (2+2+2).
     
     Args:
         quiz: Diccionario con el quiz generado
@@ -72,8 +72,8 @@ def validate_quiz_structure(quiz: dict) -> Tuple[bool, Optional[str]]:
         if not isinstance(quiz[section], list):
             return False, f"Sección {section} debe ser una lista"
         
-        if len(quiz[section]) != 3:
-            return False, f"Sección {section} debe tener exactamente 3 preguntas, tiene {len(quiz[section])}"
+        if len(quiz[section]) != 2:
+            return False, f"Sección {section} debe tener exactamente 2 preguntas, tiene {len(quiz[section])}"
         
         # Validar que cada pregunta tenga 'question' y 'answer'
         for i, q in enumerate(quiz[section]):

@@ -1,7 +1,7 @@
 import os
 import time
 from typing import List, Dict, Optional
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 class WebSearch:
     """Busca información complementaria en internet para enriquecer el contexto."""
