@@ -1,0 +1,52 @@
+name: Daily Study Bot
+
+on:
+  schedule:
+    # Runs at 12:00, 17:00, 22:00 UTC (Approx 9am, 2pm, 7pm in Chile/Latam)
+    - cron: '13 16 * * *'
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  study-session:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to commit state.json
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Bot
+        timeout-minutes: 10
+        continue-on-error: true
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python main.py
+
+      - name: Commit and Push State
+        if: always()
+        run: |
+          git config --global user.name "StudyBot Agent"
+          git config --global user.email "bot@example.com"
+          git config --global pull.rebase false
+          git pull origin main || true
+          if [ -f data/state.json ]; then
+            git add data/state.json data/state.json.backup 2>/dev/null || true
+            git commit -m "Update study progress $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes to commit"
+            git push || echo "Push failed, will retry next run"
+          else
+            echo "No state file generated (likely no quiz sent or error occurred)."
+          fi
