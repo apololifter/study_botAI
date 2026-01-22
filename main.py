@@ -203,9 +203,18 @@ async def main():
                         minutes_left = int(time_remaining / 60)
                         if minutes_left > 0:
                             logger.info(f"Sesión activa. Faltan {total_questions - answered_count} respuestas. Tiempo restante: {minutes_left} minutos")
+                            logger.info("No se generará un nuevo quiz hasta terminar el actual o que expire.")
+                            return
                 else:
                     logger.info("No new answers found for pending session.")
-                
+                    # Si no hubo respuestas pero la sesión sigue válida, tampoco generamos otro
+                    # para no spammear. Salvo que queramos forzarlo.
+                    # Asumimos que si no ha expirado, respetamos el tiempo.
+                    time_remaining = pending.get("expires_at", 0) - time.time()
+                    if time_remaining > 0:
+                         logger.info("Sesión válida esperando respuestas. Terminando ejecución.")
+                         return
+
             except Exception as e:
                 logger.error(f"Error procesando sesión pendiente: {e}")
                 # Continuar con el flujo normal aunque falle el procesamiento
