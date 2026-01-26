@@ -3,6 +3,7 @@ name: Daily Study Bot
 on:
   schedule:
     # Runs at 08:00, 17:00, 22:00 UTC (Approx 5am, 2pm, 7pm in Chile/Latam)
+    # Schedule updated: Fresh push
     - cron: '0 8,17,22 * * *'
   workflow_dispatch: # Allows manual trigger
 
