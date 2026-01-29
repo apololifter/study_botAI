@@ -4,8 +4,8 @@ from telegram import Bot, Update
 
 class TelegramReceiver:
     """
-    Lightweight receiver using getUpdates (polling) intended for short-lived runs
-    (e.g., GitHub Actions cron).
+    Lightweight receiver using getUpdates (polling) intended for short-lived runs.
+    Updated to handle Text (including Links) and Documents (PDFs).
     """
 
     def __init__(self):
@@ -22,11 +22,9 @@ class TelegramReceiver:
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         """
-        Returns user text messages as dicts:
-          { "update_id": int, "date": int, "text": str, "chat_id": str, "from_id": int }
+        Returns user messages as dicts. Handles Text and Documents.
         """
         offset = None if last_update_id is None else last_update_id + 1
-        # get_updates is an async method in python-telegram-bot v20+
         updates: List[Update] = await self.bot.get_updates(offset=offset, limit=limit, timeout=0)
 
         out: List[Dict[str, Any]] = []
@@ -34,18 +32,48 @@ class TelegramReceiver:
             msg = getattr(u, "message", None)
             if not msg:
                 continue
-            if not getattr(msg, "text", None):
-                continue
+            
             chat_id = str(msg.chat_id)
             if allowed_chat_id and chat_id != str(allowed_chat_id):
                 continue
-            out.append(
-                {
-                    "update_id": u.update_id,
-                    "date": msg.date.timestamp() if msg.date else None,
-                    "text": msg.text,
-                    "chat_id": chat_id,
-                    "from_id": getattr(getattr(msg, "from_user", None), "id", None),
+            
+            # Determine content type
+            text = getattr(msg, "text", "") or ""
+            document = getattr(msg, "document", None)
+            
+            # If neither text nor document, skip (unless we want captions from photos later)
+            if not text and not document:
+                continue
+
+            msg_data = {
+                "update_id": u.update_id,
+                "date": msg.date.timestamp() if msg.date else None,
+                "text": text,
+                "chat_id": chat_id,
+                "from_id": getattr(getattr(msg, "from_user", None), "id", None),
+                "document": None
+            }
+
+            if document:
+                msg_data["document"] = {
+                    "file_id": document.file_id,
+                    "file_name": document.file_name,
+                    "mime_type": document.mime_type,
+                    "file_size": document.file_size
                 }
-            )
+                # Check for caption if text was empty
+                if not text and msg.caption:
+                    msg_data["text"] = msg.caption
+
+            out.append(msg_data)
+            
         return out
+
+    async def download_file_content(self, file_id: str) -> bytes:
+        """Downloads a file from Telegram and returns its bytes."""
+        new_file = await self.bot.get_file(file_id)
+        # download_as_bytearray is deprecated in v20+, use download_to_memory
+        from io import BytesIO
+        out_buffer = BytesIO()
+        await new_file.download_to_memory(out_buffer)
+        return out_buffer.getvalue()

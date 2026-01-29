@@ -81,22 +81,24 @@ class QuestionGenerator:
             *   SÍ pregunta: "Completa el payload de inyección faltante para bypasser el filtro X."
 
         === FORMATO REQUERIDO (JSON) ===
-        Debes devolver un JSON válido con estas 3 categorías:
+        Debes devolver un JSON válido con estas 3 categorías.
+        IMPORTANTE: Debes generar EXACTAMENTE 2 preguntas por categoría. NI MÁS, NI MENOS.
 
-        1.  "easy" (Básicas pero precisas): Definiciones técnicas, flags de comandos, puertos por defecto, sintaxis básica.
-        2.  "development" (Análisis): Explicar POR QUÉ funciona un payload, comparar dos métodos del texto, analizar un snippet de código.
-        3.  "case_study" (Aplicación Real - LA MÁS IMPORTANTE):
+        1.  "easy" (EXACTAMENTE 2 preguntas): Definiciones técnicas, flags de comandos, puertos por defecto, sintaxis básica.
+        2.  "development" (EXACTAMENTE 2 preguntas): Explicar POR QUÉ funciona un payload, comparar dos métodos del texto, analizar un snippet de código.
+        3.  "case_study" (EXACTAMENTE 2 preguntas):
             *   Plantea un escenario realista (un servidor caído, un paciente enfermo, una auditoría).
             *   El usuario debe "resolverlo" aplicando un dato específico del texto.
             *   La respuesta debe ser la solución técnica exacta.
 
         === REGLAS CRÍTICAS ===
+        *   **CANTIDAD:** 2 preguntas easy, 2 development, 2 case_study. (Total: 6 preguntas).
         *   **Prohibido** preguntas genéricas como "¿Qué nos dice el texto?".
         *   Usa vocabulario técnico avanzado.
         *   Si el texto tiene código, OBLIGA al usuario a interpretar o completar código.
         *   Idioma: Español (pero mantén términos técnicos en inglés si aplica, ej: "payload", "buffer overflow").
 
-        Estructura JSON exacta:
+        Estructura JSON exacta (RESPETA ESTE ESQUEMA):
         {{
             "easy": [
                 {{ "question": "...", "answer": "..." }},

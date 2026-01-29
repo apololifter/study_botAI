@@ -13,6 +13,7 @@ from src.telegram_receiver import TelegramReceiver
 from src.ai_evaluator import AnswerEvaluator
 from src.web_search import WebSearch
 from src.coach_logic import CoachLogic
+from src.content_processor import ContentProcessor
 from src.utils import logger, validate_quiz_structure
 
 # Load env if running locally
@@ -66,25 +67,27 @@ async def _evaluate_and_save_answers(state_manager, pending, evaluator, answers,
         
         level = evaluation.get("level", "medio")
         
-        # Ajustar nivel si es parcial (ser más conservador)
+        # Ajustar nivel si es parcial
         if partial:
-            if level == "alto":
-                level = "medio"  # No puede ser "alto" si no respondió todo
+            if level == "alto": level = "medio"
             logger.info(f"Evaluación parcial: {len(answers)}/6 respuestas → nivel: {level}")
         
-        # Guardar performance
-        state_manager.record_performance(
-            page_id=page_id,
-            page_title=page_title,
-            level=level,
-            user_text=combined_text,
-            evaluation=evaluation,
-        )
+        # Guardar performance (si es notion page_id, sino loguear)
+        if page_id and not page_id.startswith("DIRECT_"):
+            state_manager.record_performance(
+                page_id=page_id,
+                page_title=page_title,
+                level=level,
+                user_text=combined_text,
+                evaluation=evaluation,
+            )
+        else:
+            logger.info("Skipping Notion performance save for direct content.")
         
         status = "parcial" if partial else "completa"
         logger.info(f"Performance guardada ({status}): {page_title} → {level}")
         
-        # Notificar al usuario si es posible
+        # Notificar al usuario
         try:
             from src.telegram_bot import TelegramSender
             telegram = TelegramSender()
@@ -106,6 +109,43 @@ async def _evaluate_and_save_answers(state_manager, pending, evaluator, answers,
     except Exception as e:
         logger.error(f"Error evaluando respuestas: {e}")
 
+async def _process_incoming_content(msg: dict, processor: ContentProcessor, receiver: TelegramReceiver) -> tuple[str, str]:
+    """Processes a message containing a file or URL and returns (title, content)."""
+    text = msg.get("text", "")
+    document = msg.get("document")
+    
+    title = "Contenido Enviado"
+    content = ""
+    
+    if document:
+        # Process PDF
+        file_id = document["file_id"]
+        file_name = document["file_name"]
+        logger.info(f"Processing PDF: {file_name}")
+        
+        file_bytes = await receiver.download_file_content(file_id)
+        extracted_text = processor.extract_text_from_pdf(file_bytes)
+        
+        if extracted_text:
+            content = extracted_text
+            title = file_name
+        else:
+            logger.warning("No text extracted from PDF")
+            
+    elif text:
+        # Check for URL
+        url = processor.find_url_in_text(text)
+        if url:
+            logger.info(f"Processing URL: {url}")
+            extracted_text = processor.extract_text_from_url(url)
+            if extracted_text:
+                content = extracted_text
+                title = f"Web: {url}"
+            else:
+                logger.warning("No text extracted from URL")
+    
+    return title, content
+
 # --- Main Routine ---
 
 async def main():
@@ -114,221 +154,190 @@ async def main():
     
     # 1. Initialize Components
     state_manager = StateManager()
+    
     try:
         print("DEBUG: Initializing components...", flush=True)
-        print("DEBUG: - Notion...", flush=True)
         notion = NotionAdapter()
-        print("DEBUG: - AI Generator...", flush=True)
         ai = QuestionGenerator()
-        print("DEBUG: - Evaluator...", flush=True)
         evaluator = AnswerEvaluator()
-        print("DEBUG: - TelegramSender...", flush=True)
         telegram = TelegramSender()
-        print("DEBUG: - TelegramReceiver...", flush=True)
         receiver = TelegramReceiver()
-        print("DEBUG: - WebSearch...", flush=True)
         web_search = WebSearch()
-        print("DEBUG: - CoachLogic...", flush=True)
         coach = CoachLogic(state_manager)
+        processor = ContentProcessor()
         print("DEBUG: Initialization complete.", flush=True)
     except Exception as e:
         print(f"DEBUG: Error happened: {e}")
         logger.error(f"Initialization Failed: {e}")
         sys.exit(1)
 
-    # 1.5 Process pending session
-    print("DEBUG: Checking pending session...")
+    # 2. Get New Messages (Single Source of Truth)
+    last_update_id = state_manager.get_last_update_id()
+    new_msgs = await receiver.get_new_messages(last_update_id, allowed_chat_id=os.getenv("TELEGRAM_CHAT_ID"))
+    
+    if new_msgs:
+        max_update = max(m["update_id"] for m in new_msgs)
+        state_manager.set_last_update_id(max_update)
+        logger.info(f"Fetched {len(new_msgs)} new messages.")
+    
+    # 3. Classify Messages
+    answer_msgs = []
+    content_msgs = []
+    
+    for msg in new_msgs:
+        text = msg.get("text", "")
+        document = msg.get("document")
+        
+        # Check for URL in text
+        has_url = "http" in text if text else False
+        
+        if document or has_url:
+            content_msgs.append(msg)
+        else:
+            # Assume it's an answer if it's just text
+            answer_msgs.append(msg)
+
+    # 4. Handle Direct Content (Highest Priority)
+    if content_msgs:
+        target_msg = content_msgs[-1] # Process the latest one
+        logger.info("New content detected! Processing...")
+        
+        title, content = await _process_incoming_content(target_msg, processor, receiver)
+        
+        if content and len(content) > 100:
+            logger.info(f"Content extracted successfully ({len(content)} chars). Generating quiz...")
+            
+            # Generar Quiz
+            try:
+                # LIMITAR CONTENIDO para no explotar el contexto de la IA
+                # REDUCCIÓN DRÁSTICA: 15k caracteres (aprox 3.7k tokens) para asegurar velocidad y evitar timeouts.
+                safe_content = content[:15000]
+                logger.info(f"Enviando {len(safe_content)} caracteres a la IA...")
+                
+                # Tell AI this is direct content
+                instructions = "IMPORTANTE: El usuario ha enviado este documento especificamente. Genera preguntas BASADAS EXCLUSIVAMENTE en este texto."
+                
+                quiz = ai.generate_questions(
+                    title, 
+                    safe_content, 
+                    enriched_context=safe_content, # Use content as context
+                    personalized_instructions=instructions
+                )
+                
+                if quiz:
+                    is_valid, error_msg = validate_quiz_structure(quiz)
+                    if is_valid:
+                        # Send to Telegram
+                        sent_at_ts = time.time()
+                        # Use a special prefix for page_id to avoid Notion confusion
+                        pseudo_id = f"DIRECT_{int(sent_at_ts)}"
+                        
+                        session_id = state_manager.set_pending_quiz(pseudo_id, title, quiz, sent_at_ts)
+                        await telegram.send_quiz(title, quiz, session_id=session_id)
+                        logger.info("Quiz from direct content sent!")
+                        return # Exit after handling content
+                    else:
+                        logger.error(f"Invalid quiz generated: {error_msg}")
+            except Exception as e:
+                logger.error(f"Error generating quiz from content: {e}")
+        else:
+            logger.warning("Content too short or empty. Ignoring.")
+
+    # 5. Handle Pending Session (Answers)
     pending = state_manager.get_pending_quiz()
-    print(f"DEBUG: Pending session status: {bool(pending)}")
     
     if pending:
-        logger.info("Sesión pendiente encontrada. Procesando respuestas...")
-        
-        # Verificar si la sesión expiró (1 hora)
         if state_manager.is_session_expired(pending):
-            logger.info("Sesión expirada (más de 1 hora). Cerrando y guardando respuestas parciales...")
+            logger.info("Session expired. Closing.")
             await _process_expired_session(state_manager, pending, evaluator)
             state_manager.clear_pending_quiz()
+            pending = None
         else:
-            # Sesión aún activa, procesar nuevas respuestas
-            try:
-                last_update_id = state_manager.get_last_update_id()
-                new_msgs = receiver.get_new_messages(last_update_id, allowed_chat_id=os.getenv("TELEGRAM_CHAT_ID"))
-
-                if new_msgs:
-                    max_update = max(m["update_id"] for m in new_msgs)
-                    state_manager.set_last_update_id(max_update)
-                    
-                # Procesar mensajes que llegaron después del quiz
-                sent_at = pending.get("sent_at") or 0
-                processed_answers = False
+            # Process answers from answer_msgs
+            processed_answers = False
+            sent_at = pending.get("sent_at") or 0
+            
+            for msg in answer_msgs:
+                msg_timestamp = float(msg.get("date", 0))
+                if msg_timestamp < sent_at: continue
                 
-                for msg in new_msgs:
-                    if not msg.get("text") or not msg.get("date"):
-                        continue
-                    
-                    msg_timestamp = float(msg.get("date", 0))
-                    if msg_timestamp < sent_at:
-                        continue
-                    
-                    # Intentar parsear respuesta (formato: "N) respuesta" o "N. respuesta")
-                    text = msg["text"].strip()
-                    match = re.match(r'^(\d+)[).]\s*(.+)$', text, re.DOTALL)
-                    
-                    if match:
-                        question_num = int(match.group(1))
-                        answer_text = match.group(2).strip()
-                        
-                        # Validar que el número de pregunta sea válido (1-9)
-                        if 1 <= question_num <= 9:
-                            state_manager.add_answer_to_session(question_num, answer_text, msg_timestamp)
-                            logger.info(f"Respuesta registrada para pregunta {question_num}")
-                            processed_answers = True
+                text = msg.get("text", "").strip()
+                match = re.match(r'^(\d+)[).]\s*(.+)$', text, re.DOTALL)
                 
-                # Si hay respuestas nuevas, verificar si se completó o si expiró
-                if processed_answers:
-                    answers = state_manager.get_session_answers()
-                    total_questions = 6
-                    answered_count = len(answers)
-                    
-                    logger.info(f"Progreso: {answered_count}/{total_questions} preguntas respondidas")
-                    
-                    # Si se respondieron todas o expiró, procesar
-                    if answered_count >= total_questions or state_manager.is_session_expired(pending):
-                        await _process_completed_session(state_manager, pending, evaluator, answers)
-                        state_manager.clear_pending_quiz()
-                    else:
-                        # Aún hay tiempo y faltan respuestas
-                        time_remaining = pending.get("expires_at", 0) - time.time()
-                        minutes_left = int(time_remaining / 60)
-                        if minutes_left > 0:
-                            logger.info(f"Sesión activa. Faltan {total_questions - answered_count} respuestas. Tiempo restante: {minutes_left} minutos")
-                            logger.info("No se generará un nuevo quiz hasta terminar el actual o que expire.")
-                            return
+                if match:
+                    q_num = int(match.group(1))
+                    a_text = match.group(2).strip()
+                    if 1 <= q_num <= 6: # Now we have 6 questions
+                        state_manager.add_answer_to_session(q_num, a_text, msg_timestamp)
+                        processed_answers = True
+            
+            if processed_answers:
+                answers = state_manager.get_session_answers()
+                total = 6
+                if len(answers) >= total:
+                    await _process_completed_session(state_manager, pending, evaluator, answers)
+                    state_manager.clear_pending_quiz()
+                    return # Done
                 else:
-                    logger.info("No new answers found for pending session.")
-                    # Si no hubo respuestas pero la sesión sigue válida, tampoco generamos otro
-                    # para no spammear. Salvo que queramos forzarlo.
-                    # Asumimos que si no ha expirado, respetamos el tiempo.
-                    time_remaining = pending.get("expires_at", 0) - time.time()
-                    if time_remaining > 0:
-                         logger.info("Sesión válida esperando respuestas. Terminando ejecución.")
-                         return
+                    logger.info(f"Session active. Answers: {len(answers)}/{total}.")
+                    return # Wait for more
+            
+            # If session is pending, we don't start a new Notion one
+            logger.info("Session pending. Waiting for answers.")
+            return
 
-            except Exception as e:
-                logger.error(f"Error procesando sesión pendiente: {e}")
-                # Continuar con el flujo normal aunque falle el procesamiento
-
-
-    # 2. Fetch Candidates
-    print("DEBUG: Entering Step 2 (Fetch Pages)")
+    # 6. Fallback: Notion Logic (Only if no content and no pending session)
+    print("DEBUG: Entering Notion Logic")
     logger.info("Fetching pages from Notion...")
     try:
         pages = notion.fetch_all_pages()
-        logger.info(f"Found {len(pages)} pages.")
     except Exception as e:
-        logger.error(f"Error obteniendo páginas de Notion: {e}")
+        logger.error(f"Error Notion: {e}")
         return
 
     if not pages:
-        logger.warning("No pages found. Check permissions.")
+        logger.warning("No pages found.")
         return
 
-    # 3. Select Topic (usando lógica de coaching inteligente)
-    logger.info("Seleccionando tema usando lógica de coaching inteligente...")
+    # Select Topic
     selected = coach.select_best_topic(pages)
+    if not selected: return
     
-    if not selected:
-        logger.warning("No se pudo seleccionar tema. Abortando.")
-        return
-    
-    chosen_page = selected["page"]
     chosen_page_id = selected["id"]
     title = selected["title"]
-    
-    logger.info(f"Tema seleccionado: {title} (score: {selected['score']:.2f})")
+    logger.info(f"Tema seleccionado: {title}")
 
-    # 4. Get Content
-    try:
-        content = notion.get_page_content(chosen_page_id, max_depth=5)
-    except Exception as e:
-        logger.error(f"Error obteniendo contenido de página: {e}")
-        return
-    
-    if not content:
-        logger.warning("Page is empty. Skipping.")
-        return
-    
-    logger.info(f"Content length: {len(content)} chars.")
+    # Get Content
+    content = notion.get_page_content(chosen_page_id, max_depth=5)
+    if not content: return
 
-    # 4.5 Get Coaching Context (historial, gaps, temas relacionados)
+    # Context & Enrich
     page_state = state_manager.get_page_state(chosen_page_id) or {}
-    personalized_instructions = coach.get_personalized_instructions(chosen_page_id, page_state)
-    related_topics_context = coach.get_related_topics_context(pages, chosen_page_id)
+    personalized = coach.get_personalized_instructions(chosen_page_id, page_state)
+    related = coach.get_related_topics_context(pages, chosen_page_id)
     
-    if personalized_instructions:
-        logger.info("Instrucciones personalizadas generadas basadas en historial")
-    if related_topics_context:
-        logger.info("Contexto de temas relacionados identificado")
-
-    # 4.6 Enrich with Web Search (con fallback graceful si falla)
-    logger.info("Enriching context with web search...")
     try:
-        enriched_context = web_search.get_enriched_context(title, content, max_web_chars=2000)
-        logger.info(f"Enriched context length: {len(enriched_context)} chars.")
-    except Exception as e:
-        logger.warning(f"Error en búsqueda web, usando solo contenido de Notion: {e}")
-        enriched_context = content  # Fallback seguro
+        enriched = web_search.get_enriched_context(title, content, max_web_chars=2000)
+    except:
+        enriched = content
 
-    # 5. Generate Quiz (con personalización inteligente)
-    logger.info("Generating personalized questions...")
-    try:
-        quiz = ai.generate_questions(
-            title, 
-            content, 
-            enriched_context=enriched_context,
-            personalized_instructions=personalized_instructions,
-            related_topics_context=related_topics_context
-        )
-    except Exception as e:
-        logger.error(f"Error generando quiz: {e}")
-        return
+    # Generate
+    quiz = ai.generate_questions(title, content, enriched_context=enriched, personalized_instructions=personalized, related_topics_context=related)
     
-    if not quiz:
-        logger.error("Failed to generate quiz.")
-        return
-
-    # 5.5 Validate Quiz Structure
-    is_valid, error_msg = validate_quiz_structure(quiz)
-    if not is_valid:
-        logger.error(f"Quiz inválido: {error_msg}")
-        logger.error(f"Quiz recibido: {quiz}")
-        return
-
-    # 6. Send to Telegram (con sesión de 1 hora)
-    logger.info("Sending to Telegram...")
-    sent_at_ts = time.time()
-    try:
-        session_id = state_manager.set_pending_quiz(chosen_page_id, title, quiz, sent_at_ts)
-        await telegram.send_quiz(title, quiz, session_id=session_id)
-    except Exception as e:
-        logger.error(f"Error enviando quiz a Telegram: {e}")
-        return
-
-    # 7. Update State (crítico - debe guardarse siempre)
-    try:
-        state_manager.mark_page_reviewed(chosen_page_id, title)
-        # El pending_quiz ya se guardó en el paso 6 con session_id
-        logger.info("Done! State saved successfully.")
-    except Exception as e:
-        logger.error(f"Error crítico guardando estado: {e}")
-        # No hacer return aquí porque el quiz ya se envió - mejor dejar que continúe
+    if quiz:
+        is_valid, _ = validate_quiz_structure(quiz)
+        if is_valid:
+            sent_at_ts = time.time()
+            session_id = state_manager.set_pending_quiz(chosen_page_id, title, quiz, sent_at_ts)
+            await telegram.send_quiz(title, quiz, session_id=session_id)
+            try:
+                state_manager.mark_page_reviewed(chosen_page_id, title)
+            except: pass
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot interrumpido por el usuario")
         sys.exit(0)
     except Exception as e:
         logger.error(f"Error fatal: {e}")
